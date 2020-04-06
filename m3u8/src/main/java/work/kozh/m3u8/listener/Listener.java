@@ -4,7 +4,7 @@ public interface Listener {
 
     void start();
 
-    void process(String downloadUrl, int finished, int sum, float percent);
+    void process(String downloadUrl, int finished, int sum, String downloadSize, float percent);
 
     void speed(String speedPerSecond);
 

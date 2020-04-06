@@ -59,7 +59,7 @@ public class M3U8Activity extends AppCompatActivity {
                     M3u8DownloadFactory.M3U8DownloadInfo info = (M3u8DownloadFactory.M3U8DownloadInfo) msg.obj;
                     mProgressBar.setProgress((int) info.percent);
                     mPercent.setText(info.percent + "%");
-                    mNum.setText(info.finished + " / " + info.sum);
+                    mNum.setText(info.finished + " / " + info.sum + " " + info.downloadSize);
                     break;
                 case ERROR:
                     M3u8DownloadFactory.M3U8DownloadInfo error = (M3u8DownloadFactory.M3U8DownloadInfo) msg.obj;
@@ -108,6 +108,7 @@ public class M3U8Activity extends AppCompatActivity {
     public void download(View view) {
 
         String url = mEditText.getText().toString();
+
         if (TextUtils.isEmpty(url)) {
             Toast.makeText(this, "请输入地址", Toast.LENGTH_SHORT).show();
             return;
@@ -157,11 +158,11 @@ public class M3U8Activity extends AppCompatActivity {
             }
 
             @Override
-            public void process(String downloadUrl, final int finished, final int sum, final float percent) {
+            public void process(String downloadUrl, final int finished, final int sum, String downloadSize, final float percent) {
 //                System.out.println("下载网址：" + downloadUrl + "\t已下载" + finished + "个\t一共" + sum + "个\t已完成" + percent + "%");
                 Message message = Message.obtain();
                 message.what = DOWNLOADING;
-                M3u8DownloadFactory.M3U8DownloadInfo info = new M3u8DownloadFactory.M3U8DownloadInfo((int) percent, sum, finished);
+                M3u8DownloadFactory.M3U8DownloadInfo info = new M3u8DownloadFactory.M3U8DownloadInfo((int) percent, sum, finished, downloadSize);
                 message.obj = info;
                 mHandler.sendMessage(message);
             }
@@ -186,6 +187,7 @@ public class M3U8Activity extends AppCompatActivity {
                 info.error = msg;
                 message.obj = info;
                 mHandler.sendMessage(message);
+
             }
 
             @Override
@@ -211,7 +213,7 @@ public class M3U8Activity extends AppCompatActivity {
     }
 
     public void pause(View view) {
-
+        Toast.makeText(this, "是否正在下载中：" + M3u8DownloadFactory.isDownloading(), Toast.LENGTH_LONG).show();
     }
 
     public void end(View view) {
@@ -223,4 +225,5 @@ public class M3U8Activity extends AppCompatActivity {
     public void onBackPressed() {
         moveTaskToBack(true);
     }
+
 }

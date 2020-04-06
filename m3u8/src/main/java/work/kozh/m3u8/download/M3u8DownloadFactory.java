@@ -1,5 +1,6 @@
 package work.kozh.m3u8.download;
 
+import android.annotation.SuppressLint;
 import android.os.Build;
 
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -21,8 +22,10 @@ import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.Security;
 import java.security.spec.AlgorithmParameterSpec;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -55,11 +58,17 @@ import work.kozh.m3u8.utils.StringUtils;
  * 对于多线程下载 已经进行了内存优化
  * <p>
  * 加入了各类下载信息提示
+ * <p>
+ * 每次只能下载一个文件  多线程下载单个m3u8文件
+ *
  */
 
 public class M3u8DownloadFactory {
 
+    private static String mTempDir;
     private static M3u8Download m3u8Download;
+    //是否正在下载中
+    private static boolean sIsDownloading = false;
 
     /**
      *
@@ -170,6 +179,8 @@ public class M3u8DownloadFactory {
                         for (Listener downloadListener : listenerSet) {
                             downloadListener.error(e.getMessage());
                         }
+                        sIsDownloading = false;
+                        destroied();
                         e.printStackTrace();
                     }
 
@@ -193,7 +204,7 @@ public class M3u8DownloadFactory {
             //执行多线程下载
             for (String s : tsSet) {
                 i++;
-                fixedThreadPool.execute(getThread(s, i));
+                fixedThreadPool.execute(getDownloadThread(s, i));
             }
             fixedThreadPool.shutdown();
 
@@ -207,6 +218,7 @@ public class M3u8DownloadFactory {
                         try {
                             consume++;
                             BigDecimal bigDecimal = new BigDecimal(downloadBytes.toString());
+                            LogUtil.i("已下载的大小：" + StringUtils.convertToDownloadSpeed(downloadBytes, 2));
                             Thread.sleep(1000L);
 
                             /*for (Listener downloadListener : listenerSet) {
@@ -242,13 +254,17 @@ public class M3u8DownloadFactory {
                 public void run() {
                     for (Listener downloadListener : listenerSet)
                         downloadListener.start();
+                    sIsDownloading = true;
                     //轮询是否下载成功
                     while (!fixedThreadPool.isTerminated()) {
                         //监听下载进度
                         try {
                             Thread.sleep(interval);
                             for (Listener downloadListener : listenerSet)
-                                downloadListener.process(DOWNLOADURL, finishedCount, tsSet.size(),
+                                downloadListener.process(DOWNLOADURL,
+                                        finishedCount,
+                                        tsSet.size(),
+                                        StringUtils.convertToDownloadSpeed(downloadBytes, 2),
                                         new BigDecimal(finishedCount).divide(new BigDecimal(tsSet.size()), 4, BigDecimal.ROUND_HALF_UP).multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).floatValue());
                         } catch (InterruptedException e) {
                             e.printStackTrace();
@@ -257,6 +273,11 @@ public class M3u8DownloadFactory {
                     for (Listener downloadListener : listenerSet) {
                         downloadListener.end();
                     }
+
+                    //下载结束后 销毁下载管理对象
+                    destroied();
+                    sIsDownloading = false;
+
                 }
             }).start();
             new Thread(new Runnable() {
@@ -314,34 +335,51 @@ public class M3u8DownloadFactory {
          * 删除下载好的片段
          */
         private void deleteFiles() {
-            File file = new File(dir);
+            File file = new File(dir + Constant.FILESEPARATOR + mTempDir);
             for (File f : file.listFiles()) {
                 if (f.getName().endsWith(".xy") || f.getName().endsWith(".xyz"))
                     f.delete();
             }
+            //最后将文件夹删除
+            file.delete();
         }
 
         /**
-         * 开启下载线程
+         * 开启下载线程  开启下载任务线程
          * <p>
          * 多线程下载多文件 每个文件一个线程
          * <p>
          * 以.ts文件为单位，开启一个线程下载 从线程池中获取线程
+         * <p>
+         * 需要加上当前时间作为文件夹
+         * （由于合并时是根据文件夹来合并的，合并之后需要删除所有的ts文件，这里用到了多线程，所以需要按文件夹来存ts）
          *
          * @param urls ts片段链接
          * @param i    ts片段序号
          * @return 线程
          */
-        private Thread getThread(String urls, int i) {
+        private Thread getDownloadThread(String urls, int i) {
+
             return new Thread(new Runnable() {
                 @Override
                 public void run() {
+//                    LogUtil.i("下载的ts文件url：" + urls);
                     int count = 1;
                     HttpURLConnection httpURLConnection = null;
                     //xy为未解密的ts片段，如果存在，则删除  重新下载
-                    File file2 = new File(dir + Constant.FILESEPARATOR + i + ".xy");
+                    //临时下载路径需要加上这个一个文件夹，当作每个视频的辨识
+                    File file2 = new File(dir + mTempDir + Constant.FILESEPARATOR + i + ".xy");
+//                    File file2 = new File(dir + Constant.FILESEPARATOR + urls + ".xy");
                     if (file2.exists()) {
                         file2.delete();
+                    } else {
+                        try {
+                            //先得到文件的上级目录，并创建上级目录，在创建文件
+                            file2.getParentFile().mkdir();
+                            file2.createNewFile();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
                     }
                     OutputStream outputStream = null;
                     InputStream inputStream1 = null;
@@ -382,12 +420,16 @@ public class M3u8DownloadFactory {
                             }
                             outputStream.flush();
                             inputStream.close();
+
                             inputStream1 = new FileInputStream(file2);
                             int available = inputStream1.available();
                             if (bytes.length < available)
                                 bytes = new byte[available];
                             inputStream1.read(bytes);
-                            File file = new File(dir + Constant.FILESEPARATOR + i + ".xyz");
+
+                            File file = new File(dir + mTempDir + Constant.FILESEPARATOR + i + ".xyz");
+
+//                            File file = new File(dir + Constant.FILESEPARATOR + urls + ".xyz");
                             outputStream1 = new FileOutputStream(file);
                             //开始解密ts片段，这里我们把ts后缀改为了xyz，改不改都一样
                             byte[] decrypt = M3u8Download.this.decrypt(bytes, available, key, iv, method);
@@ -401,6 +443,8 @@ public class M3u8DownloadFactory {
                                 for (Listener downloadListener : listenerSet) {
                                     downloadListener.error("解密文件失败！");
                                 }
+                                sIsDownloading = false;
+                                destroied();
                                 LogUtil.e("解密失败！");
                                 break;
                             }
@@ -667,6 +711,8 @@ public class M3u8DownloadFactory {
                 }
                 throw new M3u8Exception("Key长度不是16位！");
             }
+
+            LogUtil.i("开始解密");
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS7Padding");
             SecretKeySpec keySpec = new SecretKeySpec(isByte ? keyBytes : sKey.getBytes(StandardCharsets.UTF_8), "AES");
             byte[] ivByte;
@@ -832,6 +878,10 @@ public class M3u8DownloadFactory {
             this.DOWNLOADURL = DOWNLOADURL;
             requestHeaderMap.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904" +
                     ".108 Safari/537.36");
+            //开启一个任务时，先获取一个临时的文件夹，作为ts文件的临时下载路径，后续会删除
+            Date day = new Date();
+            @SuppressLint("SimpleDateFormat") SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd-HH-mm-ss");
+            mTempDir = Constant.FILESEPARATOR + df.format(day);
         }
     }
 
@@ -856,6 +906,10 @@ public class M3u8DownloadFactory {
         m3u8Download = null;
     }
 
+    public static boolean isDownloading() {
+        return sIsDownloading;
+    }
+
 
     public static class M3U8DownloadInfo {
         public int percent;
@@ -864,11 +918,13 @@ public class M3u8DownloadFactory {
         public String speed;
         public String error;
         public String info;
+        public String downloadSize;
 
-        public M3U8DownloadInfo(int percent, int sum, int finished) {
+        public M3U8DownloadInfo(int percent, int sum, int finished, String downloadSize) {
             this.percent = percent;
             this.sum = sum;
             this.finished = finished;
+            this.downloadSize = downloadSize;
         }
 
         public M3U8DownloadInfo() {
