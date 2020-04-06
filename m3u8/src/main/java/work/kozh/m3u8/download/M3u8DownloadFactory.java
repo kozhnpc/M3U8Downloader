@@ -167,6 +167,9 @@ public class M3u8DownloadFactory {
                     } catch (Exception e) {
                         e.printStackTrace();
                         LogUtil.i("错误信息收集：" + e.getMessage());
+                        for (Listener downloadListener : listenerSet) {
+                            downloadListener.error(e.getMessage());
+                        }
                         e.printStackTrace();
                     }
 

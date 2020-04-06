@@ -218,4 +218,9 @@ public class M3U8Activity extends AppCompatActivity {
 
 
     }
+
+    @Override
+    public void onBackPressed() {
+        moveTaskToBack(true);
+    }
 }
