@@ -100,12 +100,17 @@ public class M3U8Activity extends AppCompatActivity {
         mEditText = findViewById(R.id.editText);
         mFileName = findViewById(R.id.fileName);
 
+        mEditText.setText("https://dm-h.phncdn.com/hls/videos/202002/23/286899812/,480P_2000K,240P_400K,_286899812.mp4.urlset/master" +
+                ".m3u8?ttl=1586177198&l=0&hash=561ffcb44e68b058be02b0ccf559d4d3");
+
         mProgressBar.setMax(100);
+
+        init();
 
     }
 
     @RequiresApi(api = Build.VERSION_CODES.N)
-    public void download(View view) {
+    private void init() {
 
         String url = mEditText.getText().toString();
 
@@ -207,17 +212,33 @@ public class M3U8Activity extends AppCompatActivity {
             }
         });
 
+
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.N)
+    public void download(View view) {
+
+        //初始化控件的显示情况
+        mProgressBar.setVisibility(View.INVISIBLE);
+        mSpeed.setText("");
+        mPercent.setText("");
+        mNum.setText("");
+
         mButton11.setEnabled(false);
 //        Toast.makeText(M3U8Activity.this, "开始获取视频信息，请稍等...", Toast.LENGTH_LONG).show();
         mDownload.start();
     }
 
+    @RequiresApi(api = Build.VERSION_CODES.N)
     public void pause(View view) {
-        Toast.makeText(this, "是否正在下载中：" + M3u8DownloadFactory.isDownloading(), Toast.LENGTH_LONG).show();
+//        mDownload.pause();
+        Toast.makeText(this, "是否正在下载中：" + mDownload.isDownloading(), Toast.LENGTH_LONG).show();
+//        mButton11.setEnabled(true);
     }
 
+    @RequiresApi(api = Build.VERSION_CODES.N)
     public void end(View view) {
-
+        mDownload.cancel();
 
     }
 

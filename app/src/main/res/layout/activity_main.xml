@@ -17,11 +17,11 @@
     <EditText
         android:id="@+id/editText"
         android:layout_width="match_parent"
-        android:layout_height="80dp"
-        android:layout_marginTop="8dp"
+        android:layout_height="wrap_content"
         android:gravity="start|center"
         android:hint="输入需要下载的地址"
         android:inputType="textMultiLine"
+        android:text=""
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
@@ -141,8 +141,8 @@
     <EditText
         android:id="@+id/fileName"
         android:layout_width="match_parent"
-        android:layout_height="50dp"
-        android:layout_marginTop="16dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:gravity="start|center"
         android:hint="输入下载的文件名"
         android:inputType="textMultiLine"

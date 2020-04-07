@@ -60,15 +60,13 @@ import work.kozh.m3u8.utils.StringUtils;
  * 加入了各类下载信息提示
  * <p>
  * 每次只能下载一个文件  多线程下载单个m3u8文件
- *
  */
 
 public class M3u8DownloadFactory {
 
     private static String mTempDir;
     private static M3u8Download m3u8Download;
-    //是否正在下载中
-    private static boolean sIsDownloading = false;
+
 
     /**
      *
@@ -147,47 +145,29 @@ public class M3u8DownloadFactory {
         //监听事件
         private Set<Listener> listenerSet = new HashSet<>(5);
 
-        /**
-         * 开始下载视频
-         */
-        public void start() {
-            ExecutorService executorService = Executors.newCachedThreadPool();
-            executorService.execute(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        //设置下载线程数 默认30
-                        setThreadCount(30);
-                        //校验文件完整
-                        checkField();
-                        //读取m3u8文件 涉及到联网获取
-                        String tsUrl = getTsUrl();
-                        //判断是否需要解密ts文件
-                        if (StringUtils.isEmpty(tsUrl)) {
-                            LogUtil.i("不需要解密");
-                        } else {
-                            LogUtil.i("文件需要解密，开始解密...");
-                            for (Listener downloadListener : listenerSet) {
-                                downloadListener.info("文件需要解密，开始解密...");
-                            }
-                        }
-                        //准备完毕，开始下载
-                        startDownload();
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                        LogUtil.i("错误信息收集：" + e.getMessage());
-                        for (Listener downloadListener : listenerSet) {
-                            downloadListener.error(e.getMessage());
-                        }
-                        sIsDownloading = false;
-                        destroied();
-                        e.printStackTrace();
-                    }
+        //是否正在下载中
+        private boolean mIsDownloading = false;
 
-                }
-            });
+        //是否暂停下载
+        private boolean isPaused = false;
 
-        }
+        //暂停时记录当前已经下载的task ID
+        private int taskId = -1;
+
+        //是否取消下载
+        private boolean isCanceled = false;
+
+        //下载单个任务时用到的线程池对象
+        private ExecutorService mFixedThreadPool;
+
+        //监测下载状态（结束 开始 ）的子线程
+        private Thread mThread_download_state;
+
+        //监测下载进度的子线程
+        private Thread mThread_download_progress;
+
+        //监测下载速度的子线程
+        private Thread mThread_download_speed;
 
 
         /**
@@ -195,7 +175,7 @@ public class M3u8DownloadFactory {
          */
         private void startDownload() {
             //线程池
-            final ExecutorService fixedThreadPool = Executors.newFixedThreadPool(threadCount);
+            mFixedThreadPool = Executors.newFixedThreadPool(threadCount);
             int i = 0;
             //如果生成目录不存在，则创建
             File file1 = new File(dir);
@@ -204,99 +184,133 @@ public class M3u8DownloadFactory {
             //执行多线程下载
             for (String s : tsSet) {
                 i++;
-                fixedThreadPool.execute(getDownloadThread(s, i));
+                mFixedThreadPool.execute(getDownloadThread(s, i));
             }
-            fixedThreadPool.shutdown();
+            mFixedThreadPool.shutdown();
 
             //下载过程监视  开启一个子线程专门用于监视下载过程变化
-            new Thread(new Runnable() {
+            mThread_download_state = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     int consume = 0;
                     //轮询是否下载成功
-                    while (!fixedThreadPool.isTerminated()) {
-                        try {
-                            consume++;
-                            BigDecimal bigDecimal = new BigDecimal(downloadBytes.toString());
-                            LogUtil.i("已下载的大小：" + StringUtils.convertToDownloadSpeed(downloadBytes, 2));
-                            Thread.sleep(1000L);
+                    while (!mFixedThreadPool.isTerminated()) {
+
+                        if (!isPaused) {
+                            try {
+                                consume++;
+                                BigDecimal bigDecimal = new BigDecimal(downloadBytes.toString());
+                                LogUtil.i("已下载的大小：" + StringUtils.convertToDownloadSpeed(downloadBytes, 2));
+                                Thread.sleep(1000L);
 
                             /*for (Listener downloadListener : listenerSet) {
                                 downloadListener.info("已用时" + consume + "秒！");
                             }*/
 
-                            LogUtil.i("已用时" + consume + "秒！\t下载速度：" + StringUtils.convertToDownloadSpeed(new BigDecimal(downloadBytes.toString()).subtract(bigDecimal), 3) + "/s");
-                            LogUtil.i("\t已完成" + finishedCount + "个，还剩" + (tsSet.size() - finishedCount) + "个！");
-                            LogUtil.i(new BigDecimal(finishedCount).divide(new BigDecimal(tsSet.size()), 4, BigDecimal.ROUND_HALF_UP).multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP) + "%");
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
+//                            LogUtil.i("已用时" + consume + "秒！\t下载速度：" + StringUtils.convertToDownloadSpeed(new BigDecimal(downloadBytes.toString())
+//                            .subtract(bigDecimal), 3) + "/s");
+//                            LogUtil.i("\t已完成" + finishedCount + "个，还剩" + (tsSet.size() - finishedCount) + "个！");
+//                            LogUtil.i(new BigDecimal(finishedCount).divide(new BigDecimal(tsSet.size()), 4, BigDecimal.ROUND_HALF_UP).multiply
+//                            (new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP) + "%");
+
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        } else {
+                            return;
                         }
                     }
-                    LogUtil.i("下载完成，正在合并文件！共" + finishedFiles.size() + "个！" + StringUtils.convertToDownloadSpeed(downloadBytes, 3));
+
+                    //未被取消时，才执行完成下载后的合并操作
+                    if (!isPaused) {
+                        LogUtil.i("下载完成，正在合并文件！共" + finishedFiles.size() + "个！" + StringUtils.convertToDownloadSpeed(downloadBytes, 3));
                     /*for (Listener downloadListener : listenerSet) {
                         downloadListener.info("下载完成，正在合并文件！");
                     }*/
-                    //开始合并视频
-                    M3u8Download.this.mergeTs();
-                    //删除多余的ts片段
-                    M3u8Download.this.deleteFiles();
-                    LogUtil.i("视频合并完成，欢迎使用!");
+                        //开始合并视频
+                        M3u8Download.this.mergeTs();
+                        //删除多余的ts片段
+                        M3u8Download.this.deleteFiles();
+                        LogUtil.i("视频合并完成，欢迎使用!");
+                    }
+
                 }
-            }).start();
+            });
+            mThread_download_state.start();
             //开启多个子线程 监听下载过程的进度和速度
-            startListener(fixedThreadPool);
+            startListener(mFixedThreadPool);
         }
 
         //监听回调方法
         private void startListener(ExecutorService fixedThreadPool) {
-            new Thread(new Runnable() {
+            mThread_download_progress = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     for (Listener downloadListener : listenerSet)
                         downloadListener.start();
-                    sIsDownloading = true;
+                    mIsDownloading = true;
                     //轮询是否下载成功
                     while (!fixedThreadPool.isTerminated()) {
-                        //监听下载进度
-                        try {
-                            Thread.sleep(interval);
-                            for (Listener downloadListener : listenerSet)
-                                downloadListener.process(DOWNLOADURL,
-                                        finishedCount,
-                                        tsSet.size(),
-                                        StringUtils.convertToDownloadSpeed(downloadBytes, 2),
-                                        new BigDecimal(finishedCount).divide(new BigDecimal(tsSet.size()), 4, BigDecimal.ROUND_HALF_UP).multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).floatValue());
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
+
+                        if (!isPaused) {
+                            //监听下载进度
+                            try {
+                                Thread.sleep(interval);
+                                for (Listener downloadListener : listenerSet)
+                                    downloadListener.process(DOWNLOADURL,
+                                            finishedCount,
+                                            tsSet.size(),
+                                            StringUtils.convertToDownloadSpeed(downloadBytes, 2),
+                                            new BigDecimal(finishedCount).divide(new BigDecimal(tsSet.size()), 4, BigDecimal.ROUND_HALF_UP).multiply(new BigDecimal(100)).setScale(2, BigDecimal.ROUND_HALF_UP).floatValue());
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        } else {
+                            return;
                         }
                     }
+
+
                     for (Listener downloadListener : listenerSet) {
                         downloadListener.end();
                     }
 
-                    //下载结束后 销毁下载管理对象
-                    destroied();
-                    sIsDownloading = false;
+                    //下载结束后 销毁下载管理对象 初始化一系列参数
+                    destroyDownloader();
+                    mIsDownloading = false;
+                    isPaused = false;
+                    isCanceled = false;
 
                 }
-            }).start();
-            new Thread(new Runnable() {
+            });
+            mThread_download_progress.start();
+
+            mThread_download_speed = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     while (!fixedThreadPool.isTerminated()) {
-                        //监听下载速度变化
-                        try {
-                            BigDecimal bigDecimal = new BigDecimal(downloadBytes.toString());
-                            Thread.sleep(1000L);
-                            for (Listener downloadListener : listenerSet)
-                                downloadListener.speed(StringUtils.convertToDownloadSpeed(new BigDecimal(downloadBytes.toString()).subtract(bigDecimal)
-                                        , 3) + "/s");
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
+
+                        if (!isPaused) {
+                            //监听下载速度变化
+                            try {
+                                BigDecimal bigDecimal = new BigDecimal(downloadBytes.toString());
+                                Thread.sleep(1000L);
+                                for (Listener downloadListener : listenerSet)
+                                    downloadListener.speed(StringUtils.convertToDownloadSpeed(new BigDecimal(downloadBytes.toString()).subtract(bigDecimal)
+                                            , 3) + "/s");
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+
+                        } else {
+                            return;
                         }
+
                     }
                 }
-            }).start();
+            });
+
+            mThread_download_speed.start();
         }
 
         /**
@@ -306,9 +320,11 @@ public class M3u8DownloadFactory {
             try {
                 File file = new File(dir + Constant.FILESEPARATOR + fileName + ".mp4");
                 System.gc();
-                if (file.exists())
+                if (!file.exists()) {
+                    file.createNewFile();
+                } else {
                     file.delete();
-                else file.createNewFile();
+                }
                 FileOutputStream fileOutputStream = new FileOutputStream(file);
                 byte[] b = new byte[4096];
                 for (File f : finishedFiles) {
@@ -359,7 +375,7 @@ public class M3u8DownloadFactory {
          * @return 线程
          */
         private Thread getDownloadThread(String urls, int i) {
-
+//            LogUtil.i("正在下载第 " + i + " 个文件");
             return new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -370,9 +386,11 @@ public class M3u8DownloadFactory {
                     //临时下载路径需要加上这个一个文件夹，当作每个视频的辨识
                     File file2 = new File(dir + mTempDir + Constant.FILESEPARATOR + i + ".xy");
 //                    File file2 = new File(dir + Constant.FILESEPARATOR + urls + ".xy");
+
                     if (file2.exists()) {
                         file2.delete();
                     } else {
+
                         try {
                             //先得到文件的上级目录，并创建上级目录，在创建文件
                             file2.getParentFile().mkdir();
@@ -391,86 +409,96 @@ public class M3u8DownloadFactory {
                     } catch (InterruptedException e) {
                         bytes = new byte[Constant.BYTE_COUNT];
                     }
-                    //重试次数判断
+
+                    //实际下载TS文件的逻辑
+                    //重试次数判断 加上 暂停的判断
                     while (count <= retryCount) {
-                        try {
-                            //模拟http请求获取ts片段文件
-                            URL url = new URL(urls);
-                            httpURLConnection = (HttpURLConnection) url.openConnection();
-                            httpURLConnection.setConnectTimeout((int) timeoutMillisecond);
-                            for (Map.Entry<String, Object> entry : requestHeaderMap.entrySet())
-                                httpURLConnection.addRequestProperty(entry.getKey(), entry.getValue().toString());
-                            httpURLConnection.setUseCaches(false);
-                            httpURLConnection.setReadTimeout((int) timeoutMillisecond);
-                            httpURLConnection.setDoInput(true);
-                            InputStream inputStream = httpURLConnection.getInputStream();
+
+                        if (!isPaused) {
+//                            LogUtil.i("在执行下载ts文件操作");
                             try {
-                                outputStream = new FileOutputStream(file2);
-                            } catch (FileNotFoundException e) {
-                                e.printStackTrace();
-                                continue;
-                            }
-                            int len;
-                            //将未解密的ts片段写入文件
-                            while ((len = inputStream.read(bytes)) != -1) {
-                                outputStream.write(bytes, 0, len);
-                                synchronized (M3u8Download.this) {
-                                    downloadBytes = downloadBytes.add(new BigDecimal(len));
+                                //模拟http请求获取ts片段文件
+                                URL url = new URL(urls);
+                                httpURLConnection = (HttpURLConnection) url.openConnection();
+                                httpURLConnection.setConnectTimeout((int) timeoutMillisecond);
+                                for (Map.Entry<String, Object> entry : requestHeaderMap.entrySet())
+                                    httpURLConnection.addRequestProperty(entry.getKey(), entry.getValue().toString());
+                                httpURLConnection.setUseCaches(false);
+                                httpURLConnection.setReadTimeout((int) timeoutMillisecond);
+                                httpURLConnection.setDoInput(true);
+                                InputStream inputStream = httpURLConnection.getInputStream();
+                                try {
+                                    outputStream = new FileOutputStream(file2);
+                                } catch (FileNotFoundException e) {
+                                    e.printStackTrace();
+                                    continue;
                                 }
-                            }
-                            outputStream.flush();
-                            inputStream.close();
+                                int len;
+                                //将未解密的ts片段写入文件
+                                while ((len = inputStream.read(bytes)) != -1) {
+                                    outputStream.write(bytes, 0, len);
+                                    synchronized (M3u8Download.this) {
+                                        downloadBytes = downloadBytes.add(new BigDecimal(len));
+                                    }
+                                }
+                                outputStream.flush();
+                                inputStream.close();
 
-                            inputStream1 = new FileInputStream(file2);
-                            int available = inputStream1.available();
-                            if (bytes.length < available)
-                                bytes = new byte[available];
-                            inputStream1.read(bytes);
+                                inputStream1 = new FileInputStream(file2);
+                                int available = inputStream1.available();
+                                if (bytes.length < available)
+                                    bytes = new byte[available];
+                                inputStream1.read(bytes);
 
-                            File file = new File(dir + mTempDir + Constant.FILESEPARATOR + i + ".xyz");
+                                File file = new File(dir + mTempDir + Constant.FILESEPARATOR + i + ".xyz");
 
 //                            File file = new File(dir + Constant.FILESEPARATOR + urls + ".xyz");
-                            outputStream1 = new FileOutputStream(file);
-                            //开始解密ts片段，这里我们把ts后缀改为了xyz，改不改都一样
-                            byte[] decrypt = M3u8Download.this.decrypt(bytes, available, key, iv, method);
-                            if (decrypt == null)
-                                outputStream1.write(bytes, 0, available);
-                            else outputStream1.write(decrypt);
-                            finishedFiles.add(file);
-                            break;
-                        } catch (Exception e) {
-                            if (e instanceof InvalidKeyException || e instanceof InvalidAlgorithmParameterException) {
-                                for (Listener downloadListener : listenerSet) {
-                                    downloadListener.error("解密文件失败！");
-                                }
-                                sIsDownloading = false;
-                                destroied();
-                                LogUtil.e("解密失败！");
+                                outputStream1 = new FileOutputStream(file);
+                                //开始解密ts片段，这里我们把ts后缀改为了xyz，改不改都一样
+                                byte[] decrypt = M3u8Download.this.decrypt(bytes, available, key, iv, method);
+                                if (decrypt == null)
+                                    outputStream1.write(bytes, 0, available);
+                                else outputStream1.write(decrypt);
+                                finishedFiles.add(file);
                                 break;
-                            }
-                            for (Listener downloadListener : listenerSet) {
-                                downloadListener.info("重试中...第" + count + "次获取链接！");
-                            }
-                            LogUtil.d("第" + count + "获取链接重试！\t" + urls);
-                            count++;
+                            } catch (Exception e) {
+                                if (e instanceof InvalidKeyException || e instanceof InvalidAlgorithmParameterException) {
+                                    for (Listener downloadListener : listenerSet) {
+                                        downloadListener.error("解密文件失败！");
+                                    }
+                                    mIsDownloading = false;
+                                    destroyDownloader();
+                                    LogUtil.e("解密失败！");
+                                    break;
+                                }
+                                /*for (Listener downloadListener : listenerSet) {
+                                    downloadListener.info("重试中...第" + count + "次获取链接！");
+                                }*/
+                                LogUtil.d("下载ts文件时，第" + count + "获取链接重试！\t" + urls);
+                                count++;
 //                        e.printStackTrace();
-                        } finally {
-                            try {
-                                if (inputStream1 != null)
-                                    inputStream1.close();
-                                if (outputStream1 != null)
-                                    outputStream1.close();
-                                if (outputStream != null)
-                                    outputStream.close();
-                                BLOCKING_QUEUE.put(bytes);
-                            } catch (IOException | InterruptedException e) {
-                                e.printStackTrace();
+                            } finally {
+                                try {
+                                    if (inputStream1 != null)
+                                        inputStream1.close();
+                                    if (outputStream1 != null)
+                                        outputStream1.close();
+                                    if (outputStream != null)
+                                        outputStream.close();
+                                    BLOCKING_QUEUE.put(bytes);
+                                } catch (IOException | InterruptedException e) {
+                                    e.printStackTrace();
+                                }
+                                if (httpURLConnection != null) {
+                                    httpURLConnection.disconnect();
+                                }
                             }
-                            if (httpURLConnection != null) {
-                                httpURLConnection.disconnect();
-                            }
+                        } else {
+                            return;
                         }
+
                     }
+
                     if (count > retryCount) {
                         //自定义异常
 //                        throw new M3u8Exception("连接超时！");
@@ -526,8 +554,7 @@ public class M3u8DownloadFactory {
                     if (s.startsWith("/"))
                         s = s.replaceFirst("/", "");
                     keyUrl = mergeUrl(relativeUrl, s);
-                    LogUtil.i("读取到的第一个文件流地址：\n" + keyUrl);
-//                    LogUtil.i("测试文件流地址：\n" + keyUrl);
+//                    LogUtil.i("读取到的第一个文件流地址：\n" + keyUrl);
                     break;
                 }
             }
@@ -625,52 +652,57 @@ public class M3u8DownloadFactory {
             HttpURLConnection httpURLConnection = null;
             StringBuilder content = new StringBuilder();
             while (count <= retryCount) {
-                try {
-                    URL url = new URL(urls);
-                    httpURLConnection = (HttpURLConnection) url.openConnection();
-                    httpURLConnection.setConnectTimeout((int) timeoutMillisecond);
-                    httpURLConnection.setReadTimeout((int) timeoutMillisecond);
-                    httpURLConnection.setUseCaches(false);
-                    httpURLConnection.setDoInput(true);
-                    for (Map.Entry<String, Object> entry : requestHeaderMap.entrySet())
-                        httpURLConnection.addRequestProperty(entry.getKey(), entry.getValue().toString());
-                    String line;
-                    InputStream inputStream = httpURLConnection.getInputStream();
-                    BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
-                    if (isKey) {
-                        byte[] bytes = new byte[128];
-                        int len;
-                        len = inputStream.read(bytes);
-                        isByte = true;
-                        if (len == 1 << 4) {
-                            keyBytes = Arrays.copyOf(bytes, 16);
-                            content.append("isByte");
-                        } else
-                            content.append(new String(Arrays.copyOf(bytes, len)));
-                        return content;
-                    }
-                    while ((line = bufferedReader.readLine()) != null)
-                        content.append(line).append("\n");
-                    bufferedReader.close();
-                    inputStream.close();
+                if (!isPaused) {
+                    try {
+                        URL url = new URL(urls);
+                        httpURLConnection = (HttpURLConnection) url.openConnection();
+                        httpURLConnection.setConnectTimeout((int) timeoutMillisecond);
+                        httpURLConnection.setReadTimeout((int) timeoutMillisecond);
+                        httpURLConnection.setUseCaches(false);
+                        httpURLConnection.setDoInput(true);
+                        for (Map.Entry<String, Object> entry : requestHeaderMap.entrySet())
+                            httpURLConnection.addRequestProperty(entry.getKey(), entry.getValue().toString());
+                        String line;
+                        InputStream inputStream = httpURLConnection.getInputStream();
+                        BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
+                        if (isKey) {
+                            byte[] bytes = new byte[128];
+                            int len;
+                            len = inputStream.read(bytes);
+                            isByte = true;
+                            if (len == 1 << 4) {
+                                keyBytes = Arrays.copyOf(bytes, 16);
+                                content.append("isByte");
+                            } else
+                                content.append(new String(Arrays.copyOf(bytes, len)));
+                            return content;
+                        }
+                        while ((line = bufferedReader.readLine()) != null)
+                            content.append(line).append("\n");
+                        bufferedReader.close();
+                        inputStream.close();
 
-                    //打印获取到的m3u8文本内容
-                    LogUtil.i("正在解析一个m3u8文件的内容：" + content);
+                        //打印获取到的m3u8文本内容
+//                    LogUtil.i("正在解析一个m3u8文件的内容：" + content);
 
-                    break;
-                } catch (Exception e) {
-                    LogUtil.d("第" + count + "获取链接重试！\t" + urls);
-                    for (Listener downloadListener : listenerSet) {
-                        downloadListener.info("重试中...第" + count + "次获取链接！");
-                    }
-                    count++;
-                    e.printStackTrace();
+                        break;
+                    } catch (Exception e) {
+                        LogUtil.d("读取m3u8文件流时，第" + count + "获取链接重试！\t" + urls);
+                       /* for (Listener downloadListener : listenerSet) {
+                            downloadListener.info("重试中...第" + count + "次获取链接！");
+                        }*/
+                        count++;
+                        e.printStackTrace();
 
-                } finally {
-                    if (httpURLConnection != null) {
-                        httpURLConnection.disconnect();
+                    } finally {
+                        if (httpURLConnection != null) {
+                            httpURLConnection.disconnect();
+                        }
                     }
+                } else {
+                    return content;
                 }
+
             }
             if (count > retryCount) {
                 for (Listener downloadListener : listenerSet) {
@@ -789,7 +821,128 @@ public class M3u8DownloadFactory {
             return start + end;
         }
 
-        public String getDOWNLOADURL() {
+
+        // *************************  对外开放的设置项   *******************************//
+
+
+        /**
+         * 开始下载视频
+         */
+        public void start() {
+            ExecutorService executorService = Executors.newCachedThreadPool();
+            executorService.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        //设置下载线程数 默认30
+                        setThreadCount(30);
+                        //校验文件完整
+                        checkField();
+                        //读取m3u8文件 涉及到联网获取
+                        String tsUrl = getTsUrl();
+                        //判断是否需要解密ts文件
+                        if (StringUtils.isEmpty(tsUrl)) {
+                            LogUtil.i("不需要解密");
+                        } else {
+                            LogUtil.i("文件需要解密，开始解密...");
+                            for (Listener downloadListener : listenerSet) {
+                                downloadListener.info("文件需要解密，开始解密...");
+                            }
+                        }
+                        //准备完毕，开始下载
+                        startDownload();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        LogUtil.i("错误信息收集：" + e.getMessage());
+                        for (Listener downloadListener : listenerSet) {
+                            downloadListener.error(e.getMessage());
+                        }
+                        mIsDownloading = false;
+                        destroyDownloader();
+                        e.printStackTrace();
+                    }
+
+                }
+            });
+
+        }
+
+        /**
+         * 暂停下载  由于是多线程下载，一旦开始了，就不好再去暂停了，暂时不涉及到这个操作
+         * 只要开始下载了，除非手动取消任务，否则不能暂停
+         */
+        @Deprecated
+        public void pause() {
+
+            this.isPaused = true;
+            this.mIsDownloading = false;
+
+            //取消下载任务
+            if (mFixedThreadPool != null) {
+                mFixedThreadPool.shutdownNow();
+                destroyDownloader();
+//                mFixedThreadPool.shutdown();
+            }
+
+            //停止各类监测子线程  这个要放在最前面，否则还是会去执行合并临时文件的操作
+//            mThread_download_progress.interrupt();
+//            mThread_download_speed.interrupt();
+//            mThread_download_state.interrupt();
+
+            for (Listener downloadListener : listenerSet) {
+                downloadListener.info("暂停下载任务!");
+            }
+
+            LogUtil.i("暂停下载");
+
+        }
+
+        /**
+         * 取消下载
+         */
+        public void cancel() {
+
+            //标记
+            this.isCanceled = true;
+            this.isPaused = true;
+            this.mIsDownloading = false;
+
+            //取消下载任务
+            if (mFixedThreadPool != null) {
+                mFixedThreadPool.shutdownNow();
+//                mFixedThreadPool.shutdown();
+            }
+
+            //停止各类监测子线程  这个要放在最前面，否则还是会去执行合并临时文件的操作
+            if (mThread_download_progress != null) {
+                mThread_download_progress.interrupt();
+                mThread_download_speed.interrupt();
+                mThread_download_state.interrupt();
+            }
+
+            //并删除已经下载的文件  可能会遇到：文件已经下载完毕，自动清除了
+            try {
+                deleteFiles();
+            } catch (Exception e) {
+                for (Listener downloadListener : listenerSet) {
+                    downloadListener.info("不用取消任务啦，下载已经完成，临时文件已被清除!");
+                }
+                e.printStackTrace();
+            }
+
+            //销毁下载器对象
+            destroyDownloader();
+
+            //通知下载已经结束
+            for (Listener downloadListener : listenerSet) {
+                downloadListener.end();
+            }
+
+            LogUtil.i("取消下载");
+        }
+
+
+        public String getdownloadurl() {
             return DOWNLOADURL;
         }
 
@@ -797,9 +950,14 @@ public class M3u8DownloadFactory {
             return threadCount;
         }
 
-
-        // *************************  对外开放的设置项   *******************************//
-
+        /**
+         * 获取当前下载器的下载状态
+         *
+         * @return
+         */
+        public boolean isDownloading() {
+            return mIsDownloading;
+        }
 
         /**
          * 设置下载的线程数
@@ -874,8 +1032,8 @@ public class M3u8DownloadFactory {
             listenerSet.add(downloadListener);
         }
 
-        private M3u8Download(String DOWNLOADURL) {
-            this.DOWNLOADURL = DOWNLOADURL;
+        private M3u8Download(String url) {
+            this.DOWNLOADURL = url;
             requestHeaderMap.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904" +
                     ".108 Safari/537.36");
             //开启一个任务时，先获取一个临时的文件夹，作为ts文件的临时下载路径，后续会删除
@@ -893,21 +1051,24 @@ public class M3u8DownloadFactory {
      */
     @RequiresApi(api = Build.VERSION_CODES.N)
     public static M3u8Download getInstance(String downloadUrl) {
-        if (m3u8Download == null) {
+       /* if (m3u8Download == null) {
             synchronized (M3u8Download.class) {
                 if (m3u8Download == null)
                     m3u8Download = new M3u8Download(downloadUrl);
             }
-        }
+        }*/
+
+        //不使用单例
+        m3u8Download = new M3u8Download(downloadUrl);
+
         return m3u8Download;
     }
 
-    public static void destroied() {
+    /**
+     * 销毁下载器对象
+     */
+    public static void destroyDownloader() {
         m3u8Download = null;
-    }
-
-    public static boolean isDownloading() {
-        return sIsDownloading;
     }
 
 
